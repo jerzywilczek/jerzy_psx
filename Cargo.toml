@@ -9,4 +9,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = { version = "1.0.68", features = ["backtrace"] }
 clap = { version = "4.0.32", features = ["derive"] }
+
+[features]
+default = []
+cpu-debug = []
