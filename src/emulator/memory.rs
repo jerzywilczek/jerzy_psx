@@ -23,6 +23,10 @@ impl Memory {
             return Ok(self.bios.load32(offset));
         }
 
+        if let Some(_offset) = offset_in(addr, map::MEM_CTL_1) {
+            bail!("FIXME: loads from mem ctl 1")
+        }
+
         bail!(
             "Memory: attempted a load32 from a non-mapped address: 0x{:08x}",
             addr
@@ -35,6 +39,21 @@ impl Memory {
                 "Memory: attempted a store32 to a non-aligned address (0x{addr:08x} % 4 = {} != 0)",
                 addr % 4
             );
+        }
+
+        if offset_in(addr, map::BIOS).is_some() {
+            bail!("Memory: attempted a write to BIOS memory: 0x{:08x}", addr)
+        }
+
+        if let Some(offset) = offset_in(addr, map::MEM_CTL_1) {
+            match offset {
+                0 => bail!("Memory: writes to expansion 1 base address not permitted"),
+                4 => bail!("Memory: writes to expansion 2 base address not permitted"),
+                _ => {
+                    println!("FIXME: Unhandled mem ctl 1 write (addr = 0x{:08x})", addr);
+                    return Ok(());
+                }
+            }
         }
 
         bail!(
@@ -61,6 +80,9 @@ mod map {
 
     pub const BIOS_SIZE: u32 = 512 * 1024;
     pub const BIOS: Range<u32> = 0xbfc00000..0xbfc00000 + BIOS_SIZE;
+
+    pub const MEM_CTL_1_SIZE: u32 = 36;
+    pub const MEM_CTL_1: Range<u32> = 0x1f801000..0x1f801000 + MEM_CTL_1_SIZE;
 }
 
 impl Bios {

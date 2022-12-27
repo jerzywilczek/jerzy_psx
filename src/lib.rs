@@ -9,13 +9,7 @@ mod emulator;
 #[derive(Debug, clap::Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Params {
-    #[cfg(not(debug_assertions))]
     /// A path to the BIOS file
-    bios: PathBuf,
-
-    #[cfg(debug_assertions)]
-    /// A path to the BIOS file
-    #[arg(default_value = "roms/scph1001.bin")]
     bios: PathBuf,
 }
 
