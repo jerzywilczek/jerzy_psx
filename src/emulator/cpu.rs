@@ -8,6 +8,7 @@ pub struct Cpu {
     pc: u32,
     gp_regs: [u32; 32],
     memory: Memory,
+    next_insn: Instruction,
 }
 
 impl Cpu {
@@ -19,6 +20,7 @@ impl Cpu {
             pc: 0xbfc00000,
             gp_regs,
             memory: Memory::new(bios_path)?,
+            next_insn: Instruction::decode(0).unwrap(), // noop
         })
     }
 
@@ -43,10 +45,12 @@ impl Cpu {
     pub fn cycle(&mut self) -> Result<()> {
         let code = self.load32(self.pc)?;
 
-        let insn = Instruction::decode(code)?;
-        self.execute(insn)?;
+        let insn = self.next_insn;
+        self.next_insn = Instruction::decode(code)?;
 
         self.pc = self.pc.wrapping_add(4);
+
+        self.execute(insn)?;
 
         Ok(())
     }
@@ -56,6 +60,10 @@ impl Cpu {
         println!("Executing instruction: {:?}", insn);
 
         match insn {
+            Instruction::Sll { rt, rd, imm } => self.set_reg(rd, self.reg(rt) << imm),
+            Instruction::Or { rt, rs, rd } => self.set_reg(rd, self.reg(rs) | self.reg(rt)),
+            Instruction::J { imm } => self.pc = (self.pc & 0xf0000000) | (imm << 2),
+            Instruction::Addiu { rt, rs, imm } => self.set_reg(rt, self.reg(rs).wrapping_add(imm)),
             Instruction::Lui { imm, rt } => self.set_reg(rt, imm << 16),
             Instruction::Ori { imm, rt, rs } => self.set_reg(rt, self.reg(rs) | imm),
             Instruction::Sw { rs, rt, imm } => {
@@ -114,6 +122,28 @@ impl std::fmt::Debug for Register {
 
 #[derive(Debug, Clone, Copy)]
 enum Instruction {
+    Sll {
+        rt: Register,
+        rd: Register,
+        imm: u32,
+    },
+
+    Or {
+        rt: Register,
+        rs: Register,
+        rd: Register,
+    },
+
+    J {
+        imm: u32,
+    },
+
+    Addiu {
+        rt: Register,
+        rs: Register,
+        imm: u32,
+    },
+
     Lui {
         rt: Register,
         imm: u32,
@@ -135,6 +165,23 @@ enum Instruction {
 impl Instruction {
     fn decode(code: u32) -> Result<Self> {
         match Self::opcode(code) {
+            0x00 => match Self::secondary_opcode(code) {
+                0x00 => Ok(Self::Sll { rt: Self::rt(code), rd: Self::rd(code), imm: Self::imm5(code) }),
+
+                0x25 => Ok(Self::Or { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
+                _ => bail!(
+                    "CPU: unable to decode instruction 0x{:08x} (opcode 0x{:02x}, secondary opcode: 0x{:02x})",
+                    code,
+                    Self::opcode(code),
+                    Self::secondary_opcode(code),
+                )
+            }
+
+            0x02 => Ok(Self::J { imm: Self::imm26(code) }),
+
+            0x09 => Ok(Self::Addiu { rt: Self::rt(code), rs: Self::rs(code), imm: Self::imm16_se(code) }),
+
             0x0d => Ok(Self::Ori {
                 imm: Self::imm16(code),
                 rt: Self::rt(code),
@@ -156,7 +203,7 @@ impl Instruction {
                 "CPU: unable to decode instruction 0x{:08x} (opcode 0x{:02x})",
                 code,
                 Self::opcode(code)
-            ),
+            )
         }
     }
 
@@ -172,11 +219,27 @@ impl Instruction {
         Register((code >> 21) & 0x1f)
     }
 
+    fn rd(code: u32) -> Register {
+        Register((code >> 11) & 0x1f)
+    }
+
+    fn imm5(code: u32) -> u32 {
+        (code >> 6) & 0x1f
+    }
+
     fn imm16(code: u32) -> u32 {
         code & 0xffff
     }
 
     fn imm16_se(code: u32) -> u32 {
         (code & 0xffff) as i16 as u32
+    }
+
+    fn imm26(code: u32) -> u32 {
+        code & 0x3ffffff
+    }
+
+    fn secondary_opcode(code: u32) -> u32 {
+        code & 0x3f
     }
 }
