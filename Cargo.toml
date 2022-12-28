@@ -1,5 +1,5 @@
 [package]
-name = "jerzy-psx"
+name = "jerzy_psx"
 authors = ["Jerzy Wilczek <jerzykwilczek@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "A PSX emulator"

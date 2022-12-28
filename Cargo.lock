@@ -161,7 +161,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "jerzy-psx"
+name = "jerzy_psx"
 version = "0.1.0"
 dependencies = [
  "anyhow",
