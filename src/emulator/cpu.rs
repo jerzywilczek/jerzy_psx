@@ -13,6 +13,8 @@ pub struct Cpu {
     /// ### Bits we handle:
     ///  - 16 - Isc, Isolate cache: memory stores only target cache, not the real memory - not fully handled
     sr: u32,
+    #[cfg(feature = "cpu-debug")]
+    cycles: u32,
 }
 
 impl Cpu {
@@ -26,6 +28,8 @@ impl Cpu {
             memory: Memory::new(bios_path)?,
             next_insn: Instruction::decode(0).unwrap(), // noop
             sr: 0,
+            #[cfg(feature = "cpu-debug")]
+            cycles: 0,
         })
     }
 
@@ -57,12 +61,17 @@ impl Cpu {
 
         self.execute(insn)?;
 
+        #[cfg(feature = "cpu-debug")]
+        {
+            self.cycles += 1;
+        }
+
         Ok(())
     }
 
     fn execute(&mut self, insn: Instruction) -> Result<()> {
         #[cfg(feature = "cpu-debug")]
-        println!("Executing instruction: {:?}", insn);
+        println!("[cycle {:010}] Executing instruction: {:?}", self.cycles, insn);
 
         match insn {
             Instruction::Sll { rt, rd, imm } => self.set_reg(rd, self.reg(rt) << imm),
