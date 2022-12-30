@@ -104,8 +104,8 @@ impl Cpu {
             Instruction::Ori { imm, rt, rs } => self.set_reg(rt, self.reg(rs) | imm),
 
             Instruction::Mtc0 { rt, rd } => match rd {
-                Register(12) => self.sr = self.reg(rt),
-                Register(r) => bail!("CPU: move to an unhandled COP0 register: {r}"),
+                CopRegister(12) => self.sr = self.reg(rt),
+                CopRegister(r) => bail!("CPU: move to an unhandled COP0 register: {r}"),
             },
 
             Instruction::Sw { rs, rt, imm } => {
@@ -173,6 +173,9 @@ impl std::fmt::Debug for Register {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct CopRegister(u32);
+
+#[derive(Debug, Clone, Copy)]
 enum Instruction {
     Sll {
         rt: Register,
@@ -221,7 +224,7 @@ enum Instruction {
 
     Mtc0 {
         rt: Register,
-        rd: Register,
+        rd: CopRegister,
     },
 
     Sw {
@@ -267,7 +270,7 @@ impl Instruction {
             }),
 
             0x10 => match Self::cop_opcode(code) {
-                0x04 => Ok(Self::Mtc0 { rt: Self::rt(code), rd: Self::rd(code) }),
+                0x04 => Ok(Self::Mtc0 { rt: Self::rt(code), rd: Self::rd_cop(code) }),
                 _ => bail!("CPU: unable to decode coprocessor instruction 0x{:08x} (opcode 0x{:02x}, coprocessor opcode: 0x{:02x})", code, Self::opcode(code), Self::cop_opcode(code))
             }
 
@@ -289,16 +292,24 @@ impl Instruction {
         (code >> 26) as u8
     }
 
-    fn rt(code: u32) -> Register {
-        Register((code >> 16) & 0x1f)
-    }
-
     fn rs(code: u32) -> Register {
         Register((code >> 21) & 0x1f)
     }
 
+    fn rt(code: u32) -> Register {
+        Register((code >> 16) & 0x1f)
+    }
+
+    fn _rt_cop(code: u32) -> CopRegister {
+        CopRegister((code >> 16) & 0x1f)
+    }
+
     fn rd(code: u32) -> Register {
         Register((code >> 11) & 0x1f)
+    }
+
+    fn rd_cop(code: u32) -> CopRegister {
+        CopRegister((code >> 11) & 0x1f)
     }
 
     fn imm5(code: u32) -> u32 {
