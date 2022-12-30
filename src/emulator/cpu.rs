@@ -71,7 +71,10 @@ impl Cpu {
 
     fn execute(&mut self, insn: Instruction) -> Result<()> {
         #[cfg(feature = "cpu-debug")]
-        println!("[cycle {:010}] Executing instruction: {:?}", self.cycles, insn);
+        println!(
+            "[cycle {:010}] Executing instruction: {:?}",
+            self.cycles, insn
+        );
 
         match insn {
             Instruction::Sll { rt, rd, imm } => self.set_reg(rd, self.reg(rt) << imm),
@@ -271,7 +274,12 @@ impl Instruction {
 
             0x10 => match Self::cop_opcode(code) {
                 0x04 => Ok(Self::Mtc0 { rt: Self::rt(code), rd: Self::rd_cop(code) }),
-                _ => bail!("CPU: unable to decode coprocessor instruction 0x{:08x} (opcode 0x{:02x}, coprocessor opcode: 0x{:02x})", code, Self::opcode(code), Self::cop_opcode(code))
+                _ => bail!(
+                    "CPU: unable to decode coprocessor instruction 0x{:08x} (opcode 0x{:02x}, coprocessor opcode: 0x{:02x})",
+                    code,
+                    Self::opcode(code),
+                    Self::cop_opcode(code)
+                )
             }
 
             0x2b => Ok(Self::Sw {
