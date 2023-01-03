@@ -13,6 +13,9 @@ pub struct Cpu {
     /// ### Bits we handle:
     ///  - 16 - Isc, Isolate cache: memory stores only target cache, not the real memory - not fully handled
     sr: u32,
+    delayed_load: (Register, u32),
+    current_load: (Register, u32),
+    reg_to_set: (Register, u32),
     #[cfg(feature = "cpu-debug")]
     cycles: u32,
 }
@@ -28,6 +31,9 @@ impl Cpu {
             memory: Memory::new(bios_path)?,
             next_insn: Instruction::decode(0).unwrap(), // noop
             sr: 0,
+            delayed_load: (Register(0), 0),
+            current_load: (Register(0), 0),
+            reg_to_set: (Register(0), 0),
             #[cfg(feature = "cpu-debug")]
             cycles: 0,
         })
@@ -46,9 +52,23 @@ impl Cpu {
     }
 
     fn set_reg(&mut self, reg: Register, val: u32) {
+        self.reg_to_set = (reg, val);
+    }
+
+    fn set_reg_immediately(&mut self, reg: Register, val: u32) {
         self.gp_regs[reg.0 as usize] = val;
 
         self.gp_regs[0] = 0;
+    }
+
+    fn pop_scheduled_set_regs(&mut self) {
+        for (reg, val) in [self.current_load, self.reg_to_set] {
+            self.set_reg_immediately(reg, val);
+        }
+
+        for s in [&mut self.current_load, &mut self.reg_to_set] {
+            *s = (Register(0), 0);
+        }
     }
 
     pub fn cycle(&mut self) -> Result<()> {
@@ -59,7 +79,12 @@ impl Cpu {
 
         self.pc = self.pc.wrapping_add(4);
 
+        self.current_load = self.delayed_load;
+        self.delayed_load = (Register(0), 0);
+
         self.execute(insn)?;
+
+        self.pop_scheduled_set_regs();
 
         #[cfg(feature = "cpu-debug")]
         {
@@ -79,7 +104,15 @@ impl Cpu {
         match insn {
             Instruction::Sll { rt, rd, imm } => self.set_reg(rd, self.reg(rt) << imm),
 
+            Instruction::Addu { rs, rt, rd } => {
+                self.set_reg(rd, self.reg(rs).wrapping_add(self.reg(rt)))
+            }
+
             Instruction::Or { rt, rs, rd } => self.set_reg(rd, self.reg(rs) | self.reg(rt)),
+
+            Instruction::Sltu { rs, rt, rd } => {
+                self.set_reg(rd, (self.reg(rs) < self.reg(rt)) as u32)
+            }
 
             Instruction::J { imm } => self.pc = (self.pc & 0xf0000000) | (imm << 2),
 
@@ -108,12 +141,39 @@ impl Cpu {
 
             Instruction::Mtc0 { rt, rd } => match rd {
                 CopRegister(12) => self.sr = self.reg(rt),
+                CopRegister(3) | CopRegister(5) | CopRegister(6) | CopRegister(7)
+                | CopRegister(9) | CopRegister(11) => {
+                    if self.reg(rt) != 0 {
+                        bail!(
+                            "CPU: {} moved to {rd:?}, which is a breakpoint register",
+                            self.reg(rt)
+                        )
+                    }
+                }
+
+                CopRegister(13) => {
+                    if self.reg(rt) != 0 {
+                        bail!(
+                            "CPU: {} moved to {rd:?}, which is the cause register",
+                            self.reg(rt)
+                        )
+                    }
+                }
                 CopRegister(r) => bail!("CPU: move to an unhandled COP0 register: {r}"),
             },
 
+            Instruction::Lw { rs, rt, imm } => {
+                if self.sr & 0x10000 == 0 {
+                    // cache is not isolated, do load
+                    let val = self.load32(self.reg(rs).wrapping_add(imm))?;
+
+                    self.delayed_load = (rt, val);
+                }
+            }
+
             Instruction::Sw { rs, rt, imm } => {
                 if self.sr & 0x10000 == 0 {
-                    // cache is not isolated, store for real
+                    // cache is not isolated, do store
                     self.store32(self.reg(rs).wrapping_add(imm), self.reg(rt))?
                 }
             }
@@ -186,7 +246,19 @@ enum Instruction {
         imm: u32,
     },
 
+    Addu {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
     Or {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
+    Sltu {
         rs: Register,
         rt: Register,
         rd: Register,
@@ -230,6 +302,12 @@ enum Instruction {
         rd: CopRegister,
     },
 
+    Lw {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
     Sw {
         rs: Register,
         rt: Register,
@@ -243,7 +321,11 @@ impl Instruction {
             0x00 => match Self::secondary_opcode(code) {
                 0x00 => Ok(Self::Sll { rt: Self::rt(code), rd: Self::rd(code), imm: Self::imm5(code) }),
 
+                0x21 => Ok(Self::Addu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
                 0x25 => Ok(Self::Or { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
+                0x2b => Ok(Self::Sltu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 _ => bail!(
                     "CPU: unable to decode instruction 0x{:08x} (opcode 0x{:02x}, secondary opcode: 0x{:02x})",
@@ -281,6 +363,12 @@ impl Instruction {
                     Self::cop_opcode(code)
                 )
             }
+
+            0x23 => Ok(Self::Lw {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
 
             0x2b => Ok(Self::Sw {
                 rs: Self::rs(code),
