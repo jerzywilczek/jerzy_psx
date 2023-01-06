@@ -4,6 +4,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::emulator::memory::Memory;
 
+use super::memory::Addressible;
+
 pub struct Cpu {
     pc: u32,
     gp_regs: [u32; 32],
@@ -39,12 +41,12 @@ impl Cpu {
         })
     }
 
-    fn load32(&mut self, addr: u32) -> Result<u32> {
-        self.memory.load32(addr).context("CPU: load32 failed")
+    fn load<T: Addressible>(&mut self, addr: u32) -> Result<T> {
+        self.memory.load(addr).context("CPU: load{} failed")
     }
 
-    fn store32(&mut self, addr: u32, val: u32) -> Result<()> {
-        self.memory.store32(addr, val)
+    fn store<T: Addressible>(&mut self, addr: u32, val: T) -> Result<()> {
+        self.memory.store(addr, val)
     }
 
     fn reg(&self, reg: Register) -> u32 {
@@ -72,7 +74,7 @@ impl Cpu {
     }
 
     pub fn cycle(&mut self) -> Result<()> {
-        let code = self.load32(self.pc)?;
+        let code = self.load(self.pc)?;
 
         let insn = self.next_insn;
         self.next_insn = Instruction::decode(code)?;
@@ -165,16 +167,23 @@ impl Cpu {
             Instruction::Lw { rs, rt, imm } => {
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do load
-                    let val = self.load32(self.reg(rs).wrapping_add(imm))?;
+                    let val = self.load(self.reg(rs).wrapping_add(imm))?;
 
                     self.delayed_load = (rt, val);
+                }
+            }
+
+            Instruction::Sh { rs, rt, imm } => {
+                if self.sr & 0x10000 == 0 {
+                    // cache is not isolated, do store
+                    self.store(self.reg(rs).wrapping_add(imm), self.reg(rt) as u16)?
                 }
             }
 
             Instruction::Sw { rs, rt, imm } => {
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do store
-                    self.store32(self.reg(rs).wrapping_add(imm), self.reg(rt))?
+                    self.store(self.reg(rs).wrapping_add(imm), self.reg(rt))?
                 }
             }
         }
@@ -308,6 +317,12 @@ enum Instruction {
         imm: u32,
     },
 
+    Sh {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
     Sw {
         rs: Register,
         rt: Register,
@@ -365,6 +380,12 @@ impl Instruction {
             }
 
             0x23 => Ok(Self::Lw {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
+            0x29 => Ok(Self::Sh {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
                 imm: Self::imm16_se(code),

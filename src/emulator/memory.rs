@@ -1,10 +1,93 @@
-use std::{ops::Range, path::Path};
+use std::{fmt::Display, ops::Range, path::Path};
 
 use anyhow::{bail, Context, Result};
 
 pub struct Memory {
     bios: Bios,
     ram: Ram,
+}
+
+pub trait Addressible {
+    const WIDTH: u32;
+
+    fn from_u32(val: u32) -> Self;
+    fn from_le_bytes(bytes: &[u8]) -> Self;
+    fn to_u32(self) -> u32;
+    fn write_for_mem_ctl_1_ok(self, offset: u32) -> bool;
+}
+
+impl Addressible for u8 {
+    const WIDTH: u32 = 1;
+
+    fn from_u32(val: u32) -> Self {
+        val as u8
+    }
+
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        let bytes: [u8; Self::WIDTH as usize] = bytes.try_into().unwrap();
+
+        Self::from_le_bytes(bytes)
+    }
+
+    fn to_u32(self) -> u32 {
+        self as u32
+    }
+
+    fn write_for_mem_ctl_1_ok(self, _: u32) -> bool {
+        false
+    }
+}
+
+impl Addressible for u16 {
+    const WIDTH: u32 = 2;
+
+    fn from_u32(val: u32) -> Self {
+        val as u16
+    }
+
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        let bytes: [u8; Self::WIDTH as usize] = bytes.try_into().unwrap();
+
+        Self::from_le_bytes(bytes)
+    }
+
+    fn to_u32(self) -> u32 {
+        self as u32
+    }
+
+    fn write_for_mem_ctl_1_ok(self, _: u32) -> bool {
+        false
+    }
+}
+
+impl Addressible for u32 {
+    const WIDTH: u32 = 4;
+
+    fn from_u32(val: u32) -> Self {
+        val
+    }
+
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        let bytes: [u8; Self::WIDTH as usize] = bytes.try_into().unwrap();
+
+        Self::from_le_bytes(bytes)
+    }
+
+    fn to_u32(self) -> u32 {
+        self
+    }
+
+    fn write_for_mem_ctl_1_ok(self, offset: u32) -> bool {
+        if offset == 0 && self != 0x1f000000 {
+            return false;
+        }
+
+        if offset == 4 && self != 0x1f802000 {
+            return false;
+        }
+
+        true
+    }
 }
 
 impl Memory {
@@ -17,62 +100,66 @@ impl Memory {
         Ok(Self { bios, ram })
     }
 
-    pub fn load32(&self, addr: u32) -> Result<u32> {
-        if addr % 4 != 0 {
-            bail!("Memory: attempted a load32 from a non-aligned address (0x{addr:08x} % 4 = {} != 0)", addr % 4);
+    pub fn load<T: Addressible>(&self, addr: u32) -> Result<T> {
+        if addr % T::WIDTH != 0 {
+            bail!("Memory: attempted a load{} from a non-aligned address (0x{addr:08x} % {} = {} != 0)", T::WIDTH * 8, T::WIDTH, addr % 4);
         }
 
+        let addr = from_masked(addr);
+
         if let Some(offset) = offset_in(addr, map::RAM) {
-            return Ok(self.ram.load32(offset));
+            return Ok(self.ram.load(offset));
         }
 
         if let Some(offset) = offset_in(addr, map::BIOS) {
-            return Ok(self.bios.load32(offset));
+            return Ok(self.bios.load(offset));
         }
 
         if let Some(_offset) = offset_in(addr, map::MEM_CTL_1) {
-            bail!("Memory: FIXME: loads from mem ctl 1")
+            bail!("Memory: FIXME: load from mem ctl 1")
         }
 
         if offset_in(addr, map::MEM_CTL_2).is_some() {
-            bail!("Memory: load32 from mem ctl 2")
+            bail!("Memory: FIXME: load from mem ctl 2")
         }
 
         if offset_in(addr, map::MEM_CTL_3).is_some() {
-            bail!("Memory: load32 from mem ctl 3")
+            bail!("Memory: FIXME: load from mem ctl 3")
         }
 
         bail!(
-            "Memory: attempted a load32 from a non-mapped address: 0x{:08x}",
+            "Memory: attempted a load from a non-mapped address: {}",
             addr
         );
     }
 
-    pub fn store32(&mut self, addr: u32, val: u32) -> Result<()> {
-        if addr % 4 != 0 {
+    pub fn store<T: Addressible>(&mut self, addr: u32, val: T) -> Result<()> {
+        if addr % T::WIDTH != 0 {
             bail!(
-                "Memory: attempted a store32 to a non-aligned address (0x{addr:08x} % 4 = {} != 0)",
-                addr % 4
+                "Memory: attempted a store{} to a non-aligned address (0x{addr:08x} % {} = {} != 0)",
+                T::WIDTH * 8,
+                T::WIDTH,
+                addr % T::WIDTH
             );
         }
 
+        let addr = from_masked(addr);
+
         if let Some(offset) = offset_in(addr, map::RAM) {
-            self.ram.store32(offset, val);
+            self.ram.store(offset, val);
             return Ok(());
         }
 
         if offset_in(addr, map::BIOS).is_some() {
-            bail!("Memory: attempted a write to BIOS memory: 0x{:08x}", addr)
+            bail!("Memory: attempted a write to BIOS memory: {}", addr)
         }
 
         if let Some(offset) = offset_in(addr, map::MEM_CTL_1) {
-            match offset {
-                0 if val != 0x1f000000 => bail!("Memory: writing a value different than 0x1f000000 to expansion 1 base address not permitted"),
-                4 if val != 0x1f802000 => bail!("Memory: writing a value different than 0x1f802000 to expansion 2 base address not permitted"),
-                _ => {
-                    println!("FIXME: Unhandled mem ctl 1 write (addr = 0x{:08x})", addr);
-                    return Ok(());
-                }
+            if val.write_for_mem_ctl_1_ok(offset) {
+                println!("FIXME: Unhandled mem ctl 1 write (addr = {})", addr);
+                return Ok(());
+            } else {
+                bail!("Memory: writing a bad value to one of the expansion addresses")
             }
         }
 
@@ -87,28 +174,55 @@ impl Memory {
         }
 
         bail!(
-            "Memory: attempted a store32 to a non-mapped address: 0x{:08x}",
+            "Memory: attempted a store to a non-mapped address: {}",
             addr
         );
     }
 }
 
-fn offset_in(addr: u32, range: Range<u32>) -> Option<u32> {
-    if !range.contains(&addr) {
+fn offset_in(addr: PhysAddr, range: Range<u32>) -> Option<u32> {
+    if !range.contains(&addr.0) {
         return None;
     }
 
-    Some(addr - range.start)
+    Some(addr.0 - range.start)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PhysAddr(u32);
+
+impl Display for PhysAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("0x{:08x}P", self.0))
+    }
+}
+
+fn from_masked(addr: u32) -> PhysAddr {
+    #[rustfmt::skip]
+    const REGION_MASK: [u32; 8] = [
+        // KUSEG - 2048 MiB
+        0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+        // KSEG0 - 512 MiB
+        0x7fffffff,
+        // KSEG1 - 512 MiB
+        0x1fffffff,
+        // KSEG2 - 1024 MiB
+        0xffffffff, 0xffffffff
+    ];
+
+    let i = (addr >> 29) as usize;
+
+    PhysAddr(addr & REGION_MASK[i])
 }
 
 mod map {
     use std::ops::Range;
 
     pub const RAM_SIZE: u32 = 2 * 1024 * 1024;
-    pub const RAM: Range<u32> = 0xa0000000..0xa0000000 + RAM_SIZE;
+    pub const RAM: Range<u32> = 0x00000000..RAM_SIZE;
 
     pub const BIOS_SIZE: u32 = 512 * 1024;
-    pub const BIOS: Range<u32> = 0xbfc00000..0xbfc00000 + BIOS_SIZE;
+    pub const BIOS: Range<u32> = 0x1fc00000..0x1fc00000 + BIOS_SIZE;
 
     pub const MEM_CTL_1_SIZE: u32 = 36;
     /// Memory and device frequencies and such things
@@ -134,17 +248,18 @@ impl Ram {
         }
     }
 
-    fn load32(&self, offset: u32) -> u32 {
+    fn load<T: Addressible>(&self, offset: u32) -> T {
         let offset = offset as usize;
-        let bytes: [u8; 4] = self.data[offset..offset + 4].try_into().unwrap();
 
-        u32::from_le_bytes(bytes)
+        T::from_le_bytes(&self.data[offset..offset + T::WIDTH as usize])
     }
 
-    fn store32(&mut self, offset: u32, val: u32) {
+    fn store<T: Addressible>(&mut self, offset: u32, val: T) {
         let offset = offset as usize;
-        let a = &mut self.data[offset..offset + 4].try_into().unwrap();
-        *a = val.to_le_bytes()
+        // let a = &mut self.data[offset..offset + T::WIDTH as usize].try_into().unwrap();
+        let bytes = &val.to_u32().to_le_bytes()[..T::WIDTH as usize];
+
+        self.data[offset..offset + T::WIDTH as usize].copy_from_slice(bytes);
     }
 }
 
@@ -170,10 +285,9 @@ impl Bios {
         Ok(Self { data })
     }
 
-    fn load32(&self, offset: u32) -> u32 {
+    fn load<T: Addressible>(&self, offset: u32) -> T {
         let offset = offset as usize;
-        let bytes: [u8; 4] = self.data[offset..offset + 4].try_into().unwrap();
 
-        u32::from_le_bytes(bytes)
+        T::from_le_bytes(&self.data[offset..offset + T::WIDTH as usize])
     }
 }
