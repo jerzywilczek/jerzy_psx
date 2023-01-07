@@ -111,6 +111,11 @@ impl Memory {
             return Ok(self.ram.load(offset));
         }
 
+        if offset_in(addr, map::EXPANSION_1).is_some() {
+            // FIXME: expansions are not implemented
+            return Ok(T::from_u32(!0));
+        }
+
         if let Some(offset) = offset_in(addr, map::BIOS) {
             return Ok(self.bios.load(offset));
         }
@@ -168,6 +173,21 @@ impl Memory {
             return Ok(());
         }
 
+        if offset_in(addr, map::INTERRUPT_CTL).is_some() {
+            println!("Memory: FIXME: store to interrupt ctl memory");
+            return Ok(());
+        }
+
+        if offset_in(addr, map::SPU).is_some() {
+            println!("Memory: FIXME: store to spu memory");
+            return Ok(());
+        }
+
+        if offset_in(addr, map::EXPANSION_2).is_some() {
+            // store to exp 2 can probably be ignored
+            return Ok(());
+        }
+
         if let Some(_offset) = offset_in(addr, map::MEM_CTL_3) {
             println!("Memory: FIXME: store to mem ctl 3 (cache control)");
             return Ok(());
@@ -221,6 +241,9 @@ mod map {
     pub const RAM_SIZE: u32 = 2 * 1024 * 1024;
     pub const RAM: Range<u32> = 0x00000000..RAM_SIZE;
 
+    pub const EXPANSION_1_SIZE: u32 = 8 * 1024 * 1024;
+    pub const EXPANSION_1: Range<u32> = 0x1f000000..0x1f000000 + EXPANSION_1_SIZE;
+
     pub const BIOS_SIZE: u32 = 512 * 1024;
     pub const BIOS: Range<u32> = 0x1fc00000..0x1fc00000 + BIOS_SIZE;
 
@@ -231,6 +254,18 @@ mod map {
     pub const MEM_CTL_2_SIZE: u32 = 4;
     /// Memory size, perhaps
     pub const MEM_CTL_2: Range<u32> = 0x1f801060..0x1f801060 + MEM_CTL_2_SIZE;
+
+    pub const INTERRUPT_CTL_SIZE: u32 = 8;
+    /// Interrupt control
+    pub const INTERRUPT_CTL: Range<u32> = 0x1f801070..0x1f801074 + INTERRUPT_CTL_SIZE;
+
+    pub const SPU_SIZE: u32 = 1024;
+    /// Sound Processing Unit
+    pub const SPU: Range<u32> = 0x1f801c00..0x1f801c00 + SPU_SIZE;
+
+    pub const EXPANSION_2_SIZE: u32 = 128;
+    /// Expansion 2 region, used for some debugging I think
+    pub const EXPANSION_2: Range<u32> = 0x1f802000..0x1f802000 + EXPANSION_2_SIZE;
 
     pub const MEM_CTL_3_SIZE: u32 = 4;
     /// Cache control
