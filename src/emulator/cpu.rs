@@ -15,6 +15,10 @@ pub struct Cpu {
     /// ### Bits we handle:
     ///  - 16 - Isc, Isolate cache: memory stores only target cache, not the real memory - not fully handled
     sr: u32,
+    /// HI register, used for multiplication high result and division remainder
+    hi: u32,
+    /// LO register, used for multiplication low result and division quotient
+    lo: u32,
     delayed_load: (Register, u32),
     current_load: (Register, u32),
     reg_to_set: (Register, u32),
@@ -33,6 +37,8 @@ impl Cpu {
             memory: Memory::new(bios_path)?,
             next_insn: Instruction::decode(0).unwrap(), // noop
             sr: 0,
+            hi: 0xdeadbeef,
+            lo: 0xdeadbeef,
             delayed_load: (Register(0), 0),
             current_load: (Register(0), 0),
             reg_to_set: (Register(0), 0),
@@ -108,11 +114,57 @@ impl Cpu {
         match insn {
             Instruction::Sll { rt, rd, imm } => self.set_reg(rd, self.reg(rt) << imm),
 
+            Instruction::Srl { rt, rd, imm } => self.set_reg(rd, self.reg(rt) >> imm),
+
+            Instruction::Sra { rt, rd, imm } => {
+                self.set_reg(rd, (self.reg(rt) as i32 >> imm) as u32)
+            }
+
             Instruction::Jr { rs } => self.pc = self.reg(rs),
 
             Instruction::Jalr { rs, rd } => {
                 self.set_reg(rd, self.pc);
                 self.pc = self.reg(rs);
+            }
+
+            Instruction::Mfhi { rd } => self.set_reg(rd, self.hi),
+
+            Instruction::Mflo { rd } => self.set_reg(rd, self.lo),
+
+            Instruction::Div { rs, rt } => {
+                let n = self.reg(rs) as i32;
+                let d = self.reg(rt) as i32;
+
+                // Fixme: this should take more time than a single cycle...
+
+                if d == 0 {
+                    // div by zero special case
+                    self.hi = n as u32;
+                    self.lo = if n >= 0 { 0xffffffff } else { 1 }
+                } else if n as u32 == 0x80000000 && d == -1 {
+                    // result does not fit
+                    self.hi = 0;
+                    self.lo = 0x80000000;
+                } else {
+                    self.hi = (n % d) as u32;
+                    self.lo = (n / d) as u32;
+                }
+            }
+
+            Instruction::Divu { rs, rt } => {
+                let n = self.reg(rs);
+                let d = self.reg(rt);
+
+                // Fixme: this should take more time than a single cycle...
+
+                if d == 0 {
+                    // div by zero special case
+                    self.hi = n;
+                    self.lo = 0xffffffff;
+                } else {
+                    self.hi = n % d;
+                    self.lo = n / d;
+                }
             }
 
             Instruction::Add { rs, rt, rd } => {
@@ -131,9 +183,17 @@ impl Cpu {
                 self.set_reg(rd, self.reg(rs).wrapping_add(self.reg(rt)))
             }
 
+            Instruction::Subu { rs, rt, rd } => {
+                self.set_reg(rd, self.reg(rs).wrapping_sub(self.reg(rt)))
+            }
+
             Instruction::And { rs, rt, rd } => self.set_reg(rd, self.reg(rs) & self.reg(rt)),
 
             Instruction::Or { rt, rs, rd } => self.set_reg(rd, self.reg(rs) | self.reg(rt)),
+
+            Instruction::Slt { rs, rt, rd } => {
+                self.set_reg(rd, ((self.reg(rs) as i32) < self.reg(rt) as i32) as u32)
+            }
 
             Instruction::Sltu { rs, rt, rd } => {
                 self.set_reg(rd, (self.reg(rs) < self.reg(rt)) as u32)
@@ -203,6 +263,12 @@ impl Cpu {
             }
 
             Instruction::Addiu { rt, rs, imm } => self.set_reg(rt, self.reg(rs).wrapping_add(imm)),
+
+            Instruction::Slti { rs, rt, imm } => {
+                self.set_reg(rt, ((self.reg(rs) as i32) < imm as i32) as u32)
+            }
+
+            Instruction::Sltiu { rs, rt, imm } => self.set_reg(rt, (self.reg(rs) < imm) as u32),
 
             Instruction::Andi { rs, rt, imm } => self.set_reg(rt, self.reg(rs) & imm),
 
@@ -355,6 +421,18 @@ enum Instruction {
         imm: u32,
     },
 
+    Srl {
+        rt: Register,
+        rd: Register,
+        imm: u32,
+    },
+
+    Sra {
+        rt: Register,
+        rd: Register,
+        imm: u32,
+    },
+
     Jr {
         rs: Register,
     },
@@ -362,6 +440,24 @@ enum Instruction {
     Jalr {
         rs: Register,
         rd: Register,
+    },
+
+    Mfhi {
+        rd: Register,
+    },
+
+    Mflo {
+        rd: Register,
+    },
+
+    Div {
+        rs: Register,
+        rt: Register,
+    },
+
+    Divu {
+        rs: Register,
+        rt: Register,
     },
 
     Add {
@@ -376,6 +472,12 @@ enum Instruction {
         rd: Register,
     },
 
+    Subu {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
     And {
         rs: Register,
         rt: Register,
@@ -383,6 +485,12 @@ enum Instruction {
     },
 
     Or {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
+    Slt {
         rs: Register,
         rt: Register,
         rd: Register,
@@ -437,6 +545,18 @@ enum Instruction {
     },
 
     Addiu {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
+    Slti {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
+    Sltiu {
         rs: Register,
         rt: Register,
         imm: u32,
@@ -512,17 +632,33 @@ impl Instruction {
             0x00 => match Self::secondary_opcode(code) {
                 0x00 => Ok(Self::Sll { rt: Self::rt(code), rd: Self::rd(code), imm: Self::imm5(code) }),
 
+                0x02 => Ok(Self::Srl { rt: Self::rt(code), rd: Self::rd(code), imm: Self::imm5(code) }),
+
+                0x03 => Ok(Self::Sra { rt: Self::rt(code), rd: Self::rd(code), imm: Self::imm5(code) }),
+
                 0x08 => Ok(Self::Jr { rs: Self::rs(code) }),
 
                 0x09 => Ok(Self::Jalr { rs: Self::rs(code), rd: Self::rd(code) }),
+
+                0x10 => Ok(Self::Mfhi { rd: Self::rd(code) }),
+
+                0x12 => Ok(Self::Mflo { rd: Self::rd(code) }),
+
+                0x1a => Ok(Self::Div { rs: Self::rs(code), rt: Self::rt(code) }),
+
+                0x1b => Ok(Self::Divu { rs: Self::rs(code), rt: Self::rt(code) }),
 
                 0x20 => Ok(Self::Add { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x21 => Ok(Self::Addu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
+                0x23 => Ok(Self::Subu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
                 0x24 => Ok(Self::And { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x25 => Ok(Self::Or { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
+                0x2a => Ok(Self::Slt { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x2b => Ok(Self::Sltu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
@@ -551,6 +687,10 @@ impl Instruction {
             0x08 => Ok(Self::Addi { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16_se(code) }),
 
             0x09 => Ok(Self::Addiu { rt: Self::rt(code), rs: Self::rs(code), imm: Self::imm16_se(code) }),
+
+            0x0a => Ok(Self::Slti { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16_se(code) }),
+
+            0x0b => Ok(Self::Sltiu { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16_se(code) }),
 
             0x0c => Ok(Self::Andi { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16(code) }),
 

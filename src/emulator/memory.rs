@@ -128,6 +128,11 @@ impl Memory {
             bail!("Memory: FIXME: load from mem ctl 2")
         }
 
+        if offset_in(addr, map::INTERRUPT_CTL).is_some() {
+            println!("Memory: FIXME: read from interrupt ctl always return 0");
+            return Ok(T::from_u32(0));
+        }
+
         if offset_in(addr, map::MEM_CTL_3).is_some() {
             bail!("Memory: FIXME: load from mem ctl 3")
         }
@@ -175,6 +180,14 @@ impl Memory {
 
         if offset_in(addr, map::INTERRUPT_CTL).is_some() {
             println!("Memory: FIXME: store to interrupt ctl memory");
+            return Ok(());
+        }
+
+        if offset_in(addr, map::TIMERS).is_some() {
+            if val.to_u32() != 0 {
+                bail!("Memory: Store to the timers mmio");
+            }
+
             return Ok(());
         }
 
@@ -258,6 +271,10 @@ mod map {
     pub const INTERRUPT_CTL_SIZE: u32 = 8;
     /// Interrupt control
     pub const INTERRUPT_CTL: Range<u32> = 0x1f801070..0x1f801074 + INTERRUPT_CTL_SIZE;
+
+    pub const TIMERS_SIZE: u32 = 0x32;
+    /// Timers
+    pub const TIMERS: Range<u32> = 0x1f801100..0x1f801100 + TIMERS_SIZE;
 
     pub const SPU_SIZE: u32 = 1024;
     /// Sound Processing Unit
