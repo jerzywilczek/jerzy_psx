@@ -415,210 +415,220 @@ struct CopRegister(u32);
 
 #[derive(Debug, Clone, Copy)]
 enum Instruction {
+    /// Shift Left Logical
     Sll {
         rt: Register,
         rd: Register,
         imm: u32,
     },
 
+    /// Shift Right Logical
     Srl {
         rt: Register,
         rd: Register,
         imm: u32,
     },
 
+    /// Shift Right Arithmetical
     Sra {
         rt: Register,
         rd: Register,
         imm: u32,
     },
 
-    Jr {
-        rs: Register,
-    },
+    /// Jump to Register
+    Jr { rs: Register },
 
-    Jalr {
-        rs: Register,
-        rd: Register,
-    },
+    /// Jump to Register And Link
+    Jalr { rs: Register, rd: Register },
 
-    Mfhi {
-        rd: Register,
-    },
+    /// Move From HI
+    Mfhi { rd: Register },
 
-    Mflo {
-        rd: Register,
-    },
+    /// Move From LO
+    Mflo { rd: Register },
 
-    Div {
-        rs: Register,
-        rt: Register,
-    },
+    /// DIVide (signed)
+    Div { rs: Register, rt: Register },
 
-    Divu {
-        rs: Register,
-        rt: Register,
-    },
+    /// DIVide Unsigned
+    Divu { rs: Register, rt: Register },
 
+    /// ADD (with signed overflow trap)
     Add {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// ADD Unsigned (w/o signed overflow trap)
     Addu {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// SUB Unsigned (w/o signed overflow trap)
     Subu {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// logical AND
     And {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// logical OR
     Or {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// Set on Less Than (signed)
     Slt {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// Set on Less Than Unsigned
     Sltu {
         rs: Register,
         rt: Register,
         rd: Register,
     },
 
+    /// One of:
+    ///  - BLTZ - Branch on Less Than Zero
+    ///  - BGEZ - Branch on Greater or Equal to Zero
+    ///  - BLTZAL - Branch on Less Than Zero And Link
+    ///  - BGEZAL - Branch on Greater or Equal to Zero And Link
+    ///
+    /// The `bcondz_specifier` specifies which one it is
     Bcondz {
         rs: Register,
         bcondz_specifier: u32,
         imm: u32,
     },
 
-    J {
-        imm: u32,
-    },
+    /// Jump (to immediate)
+    J { imm: u32 },
 
-    Jal {
-        imm: u32,
-    },
+    /// Jump And Link (to immediate)
+    Jal { imm: u32 },
 
+    /// Branch on EQual
     Beq {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Branch on Not Equal
     Bne {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
-    Blez {
-        rs: Register,
-        imm: u32,
-    },
+    /// Branch on Less or Equal to Zero
+    Blez { rs: Register, imm: u32 },
 
-    Bgtz {
-        rs: Register,
-        imm: u32,
-    },
+    /// Branch on Greater Than Zero
+    Bgtz { rs: Register, imm: u32 },
 
+    /// ADD Immediate (with signed overflow trap)
     Addi {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// ADD Immediate Unsigned (w/o signed overflow trap)
     Addiu {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Set on Less Than Immediate (signed)
     Slti {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Set on Less Than Immediate Unsigned
     Sltiu {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// AND Immediate
     Andi {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// OR Immediate
     Ori {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
-    Lui {
-        rt: Register,
-        imm: u32,
-    },
+    /// Load Upper Immediate
+    Lui { rt: Register, imm: u32 },
 
-    Mfc0 {
-        rt: Register,
-        rd: CopRegister,
-    },
+    /// Move From Cop0
+    Mfc0 { rt: Register, rd: CopRegister },
 
-    Mtc0 {
-        rt: Register,
-        rd: CopRegister,
-    },
+    /// Move To Cop0
+    Mtc0 { rt: Register, rd: CopRegister },
 
+    /// Load Byte (signed)
     Lb {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Load Word
     Lw {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Load Byte Unsigned
     Lbu {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Store Byte
     Sb {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Store Halfword
     Sh {
         rs: Register,
         rt: Register,
         imm: u32,
     },
 
+    /// Store Word
     Sw {
         rs: Register,
         rt: Register,
