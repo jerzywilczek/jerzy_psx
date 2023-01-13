@@ -7,7 +7,7 @@ pub struct Memory {
     ram: Ram,
 }
 
-pub trait Addressible {
+pub trait Addressible: Copy {
     const WIDTH: u32;
 
     fn from_u32(val: u32) -> Self;
@@ -128,8 +128,18 @@ impl Memory {
             bail!("Memory: FIXME: load from mem ctl 2")
         }
 
+        if offset_in(addr, map::DMA).is_some() {
+            println!("Memory: FIXME: load from DMA");
+            return Ok(T::from_u32(0));
+        }
+
         if offset_in(addr, map::INTERRUPT_CTL).is_some() {
             println!("Memory: FIXME: read from interrupt ctl always return 0");
+            return Ok(T::from_u32(0));
+        }
+
+        if offset_in(addr, map::SPU).is_some() {
+            println!("Memory: FIXME: load from the SPU");
             return Ok(T::from_u32(0));
         }
 
@@ -175,6 +185,11 @@ impl Memory {
 
         if offset_in(addr, map::MEM_CTL_2).is_some() {
             // FIXME: Does this need to be ignored?
+            return Ok(());
+        }
+
+        if offset_in(addr, map::DMA).is_some() {
+            println!("Memory: FiXME: DMA store ({:#x} to {})", val.to_u32(), addr);
             return Ok(());
         }
 
@@ -267,6 +282,10 @@ mod map {
     pub const MEM_CTL_2_SIZE: u32 = 4;
     /// Memory size, perhaps
     pub const MEM_CTL_2: Range<u32> = 0x1f801060..0x1f801060 + MEM_CTL_2_SIZE;
+
+    pub const DMA_SIZE: u32 = 0x80;
+    /// Direct Memory Access registers
+    pub const DMA: Range<u32> = 0x1f801080..0x1f801080 + DMA_SIZE;
 
     pub const INTERRUPT_CTL_SIZE: u32 = 8;
     /// Interrupt control

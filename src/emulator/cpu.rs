@@ -7,16 +7,42 @@ use crate::emulator::memory::Memory;
 use super::memory::Addressible;
 
 pub struct Cpu {
+    /// Program Counter.
+    /// During Instruction execution, this points at the instruction that will be executed in the next cycle.
     pc: u32,
+
+    /// Address of the currently executed instruction, used for setting the EPC reg on exceptions
+    cur_insn_addr: u32,
+
+    /// This becomes the new pc during the cycle.
+    /// When an instruction is executed, this points to the instruction after the next unexecuted instruction.
+    next_pc: u32,
+
+    /// This gets set when some kind of a jump occurs
+    jumped: bool,
+
+    /// Whether the currently executed instruction is in a delay slot
+    delay_slot: bool,
+
+    /// General purpose registers
     gp_regs: [u32; 32],
     memory: Memory,
-    next_insn: Instruction,
+
     /// ## COP0 register 12: status register
     /// ### Bits we handle:
     ///  - 16 - Isc, Isolate cache: memory stores only target cache, not the real memory - not fully handled
+    ///  - 22 - BEV, Boot Exception Vectors in RAM/ROM - controls whether the exception handler is at 0xbfc00180 or 0x80000080
     sr: u32,
+
+    /// ## COP0 register 13: cause register
+    cause: u32,
+
+    ///## COP0 register 14: EPC - Exception Program Counter
+    epc: u32,
+
     /// HI register, used for multiplication high result and division remainder
     hi: u32,
+
     /// LO register, used for multiplication low result and division quotient
     lo: u32,
     delayed_load: (Register, u32),
@@ -31,12 +57,19 @@ impl Cpu {
         let mut gp_regs = [0xdeadbeef; 32];
         gp_regs[0] = 0;
 
+        let pc = 0xbfc00000;
+
         Ok(Self {
-            pc: 0xbfc00000,
+            pc,
+            cur_insn_addr: 0,
+            next_pc: pc.wrapping_add(4),
+            jumped: false,
+            delay_slot: false,
             gp_regs,
             memory: Memory::new(bios_path)?,
-            next_insn: Instruction::decode(0).unwrap(), // noop
             sr: 0,
+            cause: 0,
+            epc: 0xdeadbeef,
             hi: 0xdeadbeef,
             lo: 0xdeadbeef,
             delayed_load: (Register(0), 0),
@@ -82,17 +115,25 @@ impl Cpu {
     }
 
     pub fn cycle(&mut self) -> Result<()> {
+        self.cur_insn_addr = self.pc;
+
+        if self.pc % 4 != 0 {
+            self.raise(Exception::LoadAddressError);
+            return Ok(());
+        }
+
         let code = self.load(self.pc)?;
 
-        let insn = self.next_insn;
-        self.next_insn = Instruction::decode(code)?;
-
-        self.pc = self.pc.wrapping_add(4);
+        self.pc = self.next_pc;
+        self.next_pc = self.pc.wrapping_add(4);
 
         self.current_load = self.delayed_load;
         self.delayed_load = (Register(0), 0);
 
-        self.execute(insn)?;
+        self.delay_slot = self.jumped;
+        self.jumped = false;
+
+        self.execute(Instruction::decode(code)?)?;
 
         self.pop_scheduled_set_regs();
 
@@ -120,16 +161,28 @@ impl Cpu {
                 self.set_reg(rd, (self.reg(rt) as i32 >> imm) as u32)
             }
 
-            Instruction::Jr { rs } => self.pc = self.reg(rs),
+            Instruction::Sllv { rs, rt, rd } => {
+                self.set_reg(rd, self.reg(rt) << (self.reg(rs) & 0x1f))
+            }
+
+            Instruction::Jr { rs } => {
+                self.jump(self.reg(rs));
+            }
 
             Instruction::Jalr { rs, rd } => {
-                self.set_reg(rd, self.pc);
-                self.pc = self.reg(rs);
+                self.set_reg(rd, self.next_pc);
+                self.jump(self.reg(rs));
             }
+
+            Instruction::Syscall => self.raise(Exception::Syscall),
 
             Instruction::Mfhi { rd } => self.set_reg(rd, self.hi),
 
+            Instruction::Mthi { rs } => self.hi = self.reg(rs),
+
             Instruction::Mflo { rd } => self.set_reg(rd, self.lo),
+
+            Instruction::Mtlo { rs } => self.lo = self.reg(rs),
 
             Instruction::Div { rs, rt } => {
                 let n = self.reg(rs) as i32;
@@ -173,7 +226,10 @@ impl Cpu {
 
                 let val = match rs.checked_add(rt) {
                     Some(v) => v as u32,
-                    None => bail!("CPU: FIXME: ADD overflows are not handled"),
+                    None => {
+                        self.raise(Exception::Overflow);
+                        return Ok(());
+                    }
                 };
 
                 self.set_reg(rd, val)
@@ -211,7 +267,7 @@ impl Cpu {
                 let test = test ^ is_ge;
 
                 if do_link {
-                    self.set_reg(Register(31), self.pc);
+                    self.set_reg(Register(31), self.next_pc);
                 }
 
                 if test {
@@ -219,12 +275,12 @@ impl Cpu {
                 }
             }
 
-            Instruction::J { imm } => self.pc = (self.pc & 0xf0000000) | (imm << 2),
+            Instruction::J { imm } => self.jump((self.next_pc & 0xf0000000) | (imm << 2)),
 
             Instruction::Jal { imm } => {
-                self.set_reg(Register(31), self.pc);
+                self.set_reg(Register(31), self.next_pc);
 
-                self.pc = (self.pc & 0xf0000000) | (imm << 2);
+                self.jump((self.next_pc & 0xf0000000) | (imm << 2));
             }
 
             Instruction::Beq { rs, rt, imm } => {
@@ -276,11 +332,17 @@ impl Cpu {
 
             Instruction::Lui { imm, rt } => self.set_reg(rt, imm << 16),
 
-            Instruction::Mfc0 { rt, rd } => match rd {
-                CopRegister(12) => self.delayed_load = (rt, self.sr),
+            Instruction::Mfc0 { rt, rd } => {
+                let val = match rd {
+                    CopRegister(12) => self.sr,
+                    CopRegister(13) => self.cause,
+                    CopRegister(14) => self.epc,
 
-                CopRegister(r) => bail!("CPU: move from an unhandled COP0 register: {}", r),
-            },
+                    CopRegister(r) => bail!("CPU: move from an unhandled COP0 register: {}", r),
+                };
+
+                self.delayed_load = (rt, val);
+            }
 
             Instruction::Mtc0 { rt, rd } => match rd {
                 CopRegister(12) => self.sr = self.reg(rt),
@@ -305,6 +367,12 @@ impl Cpu {
                 CopRegister(r) => bail!("CPU: move to an unhandled COP0 register: {r}"),
             },
 
+            Instruction::Rfe => {
+                let mode = self.sr & 0x3f;
+                self.sr &= !0xf;
+                self.sr |= mode >> 2;
+            }
+
             Instruction::Lb { rs, rt, imm } => {
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do load
@@ -314,10 +382,33 @@ impl Cpu {
                 }
             }
 
-            Instruction::Lw { rs, rt, imm } => {
+            Instruction::Lh { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                if addr % 2 != 0 {
+                    self.raise(Exception::LoadAddressError);
+                    return Ok(());
+                }
+
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do load
-                    let val = self.load(self.reg(rs).wrapping_add(imm))?;
+                    let val = self.load::<u16>(addr)? as i16;
+
+                    self.delayed_load = (rt, val as u32);
+                }
+            }
+
+            Instruction::Lw { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                if addr % 4 != 0 {
+                    self.raise(Exception::LoadAddressError);
+                    return Ok(());
+                }
+
+                if self.sr & 0x10000 == 0 {
+                    // cache is not isolated, do load
+                    let val = self.load(addr)?;
 
                     self.delayed_load = (rt, val);
                 }
@@ -332,6 +423,22 @@ impl Cpu {
                 }
             }
 
+            Instruction::Lhu { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                if addr % 2 != 0 {
+                    self.raise(Exception::LoadAddressError);
+                    return Ok(());
+                }
+
+                if self.sr & 0x10000 == 0 {
+                    // cache is not isolated, do load
+                    let val = self.load::<u8>(addr)?;
+
+                    self.delayed_load = (rt, val as u32);
+                }
+            }
+
             Instruction::Sb { rs, rt, imm } => {
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do store
@@ -340,16 +447,30 @@ impl Cpu {
             }
 
             Instruction::Sh { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                if addr % 2 != 0 {
+                    self.raise(Exception::StoreAddressError);
+                    return Ok(());
+                }
+
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do store
-                    self.store(self.reg(rs).wrapping_add(imm), self.reg(rt) as u16)?
+                    self.store(addr, self.reg(rt) as u16)?
                 }
             }
 
             Instruction::Sw { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                if addr % 4 != 0 {
+                    self.raise(Exception::StoreAddressError);
+                    return Ok(());
+                }
+
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do store
-                    self.store(self.reg(rs).wrapping_add(imm), self.reg(rt))?
+                    self.store(addr, self.reg(rt))?
                 }
             }
         }
@@ -359,10 +480,46 @@ impl Cpu {
 
     fn branch(&mut self, offset: u32) {
         let offset = offset << 2;
-
-        self.pc = self.pc.wrapping_add(offset);
-        self.pc = self.pc.wrapping_sub(4);
+        self.jump(self.next_pc.wrapping_add(offset).wrapping_sub(4))
     }
+
+    fn jump(&mut self, addr: u32) {
+        self.next_pc = addr;
+        self.jumped = true;
+    }
+
+    fn raise(&mut self, exception: Exception) {
+        let handler = if self.sr & (1 << 22) != 0 {
+            0xbfc00180
+        } else {
+            0x80000080
+        };
+
+        let mode_stack = self.sr & 0x3f;
+        self.sr &= !0x3f;
+        self.sr |= (mode_stack << 2) & 0x3f;
+
+        self.cause = (exception as u32) << 2;
+
+        self.epc = self.cur_insn_addr;
+
+        if self.delay_slot {
+            self.epc = self.epc.wrapping_sub(4);
+            self.cause |= 1 << 31;
+        }
+
+        self.pc = handler;
+        self.next_pc = self.pc.wrapping_add(4);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+enum Exception {
+    LoadAddressError = 0x04,
+    StoreAddressError = 0x05,
+    Syscall = 0x08,
+    Overflow = 0x0c,
 }
 
 #[derive(Clone, Copy)]
@@ -436,17 +593,33 @@ enum Instruction {
         imm: u32,
     },
 
+    /// Shift Loft Logical Variable
+    Sllv {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
     /// Jump to Register
     Jr { rs: Register },
 
     /// Jump to Register And Link
     Jalr { rs: Register, rd: Register },
 
+    /// Syscall
+    Syscall,
+
     /// Move From HI
     Mfhi { rd: Register },
 
+    /// Move To HI
+    Mthi { rs: Register },
+
     /// Move From LO
     Mflo { rd: Register },
+
+    /// Move To LO
+    Mtlo { rs: Register },
 
     /// DIVide (signed)
     Div { rs: Register, rt: Register },
@@ -593,8 +766,18 @@ enum Instruction {
     /// Move To Cop0
     Mtc0 { rt: Register, rd: CopRegister },
 
+    /// Return From Exception
+    Rfe,
+
     /// Load Byte (signed)
     Lb {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
+    /// Load Halfword (signed)
+    Lh {
         rs: Register,
         rt: Register,
         imm: u32,
@@ -609,6 +792,13 @@ enum Instruction {
 
     /// Load Byte Unsigned
     Lbu {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
+    /// Load Halfword Unsigned
+    Lhu {
         rs: Register,
         rt: Register,
         imm: u32,
@@ -646,13 +836,21 @@ impl Instruction {
 
                 0x03 => Ok(Self::Sra { rt: Self::rt(code), rd: Self::rd(code), imm: Self::imm5(code) }),
 
+                0x04 => Ok(Self::Sllv { rs: Self::rs(code), rt: Self::rt(code), rd: Self::rd(code) }),
+
                 0x08 => Ok(Self::Jr { rs: Self::rs(code) }),
 
                 0x09 => Ok(Self::Jalr { rs: Self::rs(code), rd: Self::rd(code) }),
 
+                0x0c => Ok(Self::Syscall),
+
                 0x10 => Ok(Self::Mfhi { rd: Self::rd(code) }),
 
+                0x11 => Ok(Self::Mthi { rs: Self::rs(code) }),
+
                 0x12 => Ok(Self::Mflo { rd: Self::rd(code) }),
+
+                0x13 => Ok(Self::Mtlo { rs: Self::rs(code) }),
 
                 0x1a => Ok(Self::Div { rs: Self::rs(code), rt: Self::rt(code) }),
 
@@ -719,6 +917,13 @@ impl Instruction {
                 0x00 => Ok(Self::Mfc0 { rt: Self::rt(code), rd: Self::rd_cop(code) }),
 
                 0x04 => Ok(Self::Mtc0 { rt: Self::rt(code), rd: Self::rd_cop(code) }),
+
+                0x10 => match Self::secondary_opcode(code) {
+                    0x10 => Ok(Self::Rfe),
+
+                    _ => bail!("CPU: Illegal coprocessor instruction: 0x{:08x}", code),
+                }
+
                 _ => bail!(
                     "CPU: unable to decode coprocessor instruction 0x{:08x} (opcode 0x{:02x}, coprocessor opcode: 0x{:02x})",
                     code,
@@ -733,6 +938,12 @@ impl Instruction {
                 imm: Self::imm16_se(code),
             }),
 
+            0x21 => Ok(Self::Lh {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
             0x23 => Ok(Self::Lw {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
@@ -740,6 +951,12 @@ impl Instruction {
             }),
 
             0x24 => Ok(Self::Lbu {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
+            0x25 => Ok(Self::Lhu {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
                 imm: Self::imm16_se(code),
