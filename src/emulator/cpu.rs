@@ -165,6 +165,14 @@ impl Cpu {
                 self.set_reg(rd, self.reg(rt) << (self.reg(rs) & 0x1f))
             }
 
+            Instruction::Srlv { rs, rt, rd } => {
+                self.set_reg(rd, self.reg(rt) >> (self.reg(rs) & 0x1f))
+            }
+
+            Instruction::Srav { rs, rt, rd } => {
+                self.set_reg(rd, ((self.reg(rt) as i32) >> (self.reg(rs) & 0x1f)) as u32)
+            }
+
             Instruction::Jr { rs } => {
                 self.jump(self.reg(rs));
             }
@@ -220,6 +228,18 @@ impl Cpu {
                 }
             }
 
+            Instruction::Multu { rs, rt } => {
+                let a = self.reg(rs) as u64;
+                let b = self.reg(rt) as u64;
+
+                // Fixme: this should take more time than a single cycle...
+
+                let result = a * b;
+
+                self.hi = (result >> 32) as u32;
+                self.lo = result as u32;
+            }
+
             Instruction::Add { rs, rt, rd } => {
                 let rs = self.reg(rs) as i32;
                 let rt = self.reg(rt) as i32;
@@ -246,6 +266,8 @@ impl Cpu {
             Instruction::And { rs, rt, rd } => self.set_reg(rd, self.reg(rs) & self.reg(rt)),
 
             Instruction::Or { rt, rs, rd } => self.set_reg(rd, self.reg(rs) | self.reg(rt)),
+
+            Instruction::Nor { rs, rt, rd } => self.set_reg(rd, !(self.reg(rs) | self.reg(rt))),
 
             Instruction::Slt { rs, rt, rd } => {
                 self.set_reg(rd, ((self.reg(rs) as i32) < self.reg(rt) as i32) as u32)
@@ -600,6 +622,20 @@ enum Instruction {
         rd: Register,
     },
 
+    /// Shift Right Logical Variable
+    Srlv {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
+    /// Shift Right Arithmetical Variable
+    Srav {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
     /// Jump to Register
     Jr { rs: Register },
 
@@ -626,6 +662,9 @@ enum Instruction {
 
     /// DIVide Unsigned
     Divu { rs: Register, rt: Register },
+
+    /// MULTiply Unsigned
+    Multu { rs: Register, rt: Register },
 
     /// ADD (with signed overflow trap)
     Add {
@@ -655,8 +694,14 @@ enum Instruction {
         rd: Register,
     },
 
-    /// logical OR
+    /// bitwise OR
     Or {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
+    Nor {
         rs: Register,
         rt: Register,
         rd: Register,
@@ -838,6 +883,10 @@ impl Instruction {
 
                 0x04 => Ok(Self::Sllv { rs: Self::rs(code), rt: Self::rt(code), rd: Self::rd(code) }),
 
+                0x06 => Ok(Self::Srlv { rs: Self::rs(code), rt: Self::rt(code), rd: Self::rd(code) }),
+
+                0x07 => Ok(Self::Srav { rs: Self::rs(code), rt: Self::rt(code), rd: Self::rd(code) }),
+
                 0x08 => Ok(Self::Jr { rs: Self::rs(code) }),
 
                 0x09 => Ok(Self::Jalr { rs: Self::rs(code), rd: Self::rd(code) }),
@@ -856,6 +905,8 @@ impl Instruction {
 
                 0x1b => Ok(Self::Divu { rs: Self::rs(code), rt: Self::rt(code) }),
 
+                0x19 => Ok(Self::Multu { rs: Self::rs(code), rt: Self::rt(code) }),
+
                 0x20 => Ok(Self::Add { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x21 => Ok(Self::Addu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
@@ -865,6 +916,8 @@ impl Instruction {
                 0x24 => Ok(Self::And { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x25 => Ok(Self::Or { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
+                0x27 => Ok(Self::Nor { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x2a => Ok(Self::Slt { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
