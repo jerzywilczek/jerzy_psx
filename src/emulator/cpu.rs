@@ -184,6 +184,8 @@ impl Cpu {
 
             Instruction::Syscall => self.raise(Exception::Syscall),
 
+            Instruction::Break => self.raise(Exception::Break),
+
             Instruction::Mfhi { rd } => self.set_reg(rd, self.hi),
 
             Instruction::Mthi { rs } => self.hi = self.reg(rs),
@@ -191,6 +193,30 @@ impl Cpu {
             Instruction::Mflo { rd } => self.set_reg(rd, self.lo),
 
             Instruction::Mtlo { rs } => self.lo = self.reg(rs),
+
+            Instruction::Mult { rs, rt } => {
+                let a = (self.reg(rs) as i32) as i64;
+                let b = (self.reg(rt) as i32) as i64;
+
+                // Fixme: this should take more time than a single cycle...
+
+                let result = (a * b) as u64;
+
+                self.hi = (result >> 32) as u32;
+                self.lo = result as u32;
+            }
+
+            Instruction::Multu { rs, rt } => {
+                let a = self.reg(rs) as u64;
+                let b = self.reg(rt) as u64;
+
+                // Fixme: this should take more time than a single cycle...
+
+                let result = a * b;
+
+                self.hi = (result >> 32) as u32;
+                self.lo = result as u32;
+            }
 
             Instruction::Div { rs, rt } => {
                 let n = self.reg(rs) as i32;
@@ -228,18 +254,6 @@ impl Cpu {
                 }
             }
 
-            Instruction::Multu { rs, rt } => {
-                let a = self.reg(rs) as u64;
-                let b = self.reg(rt) as u64;
-
-                // Fixme: this should take more time than a single cycle...
-
-                let result = a * b;
-
-                self.hi = (result >> 32) as u32;
-                self.lo = result as u32;
-            }
-
             Instruction::Add { rs, rt, rd } => {
                 let rs = self.reg(rs) as i32;
                 let rt = self.reg(rt) as i32;
@@ -259,6 +273,21 @@ impl Cpu {
                 self.set_reg(rd, self.reg(rs).wrapping_add(self.reg(rt)))
             }
 
+            Instruction::Sub { rs, rt, rd } => {
+                let rs = self.reg(rs) as i32;
+                let rt = self.reg(rt) as i32;
+
+                let val = match rs.checked_sub(rt) {
+                    Some(v) => v as u32,
+                    None => {
+                        self.raise(Exception::Overflow);
+                        return Ok(());
+                    }
+                };
+
+                self.set_reg(rd, val)
+            }
+
             Instruction::Subu { rs, rt, rd } => {
                 self.set_reg(rd, self.reg(rs).wrapping_sub(self.reg(rt)))
             }
@@ -266,6 +295,8 @@ impl Cpu {
             Instruction::And { rs, rt, rd } => self.set_reg(rd, self.reg(rs) & self.reg(rt)),
 
             Instruction::Or { rt, rs, rd } => self.set_reg(rd, self.reg(rs) | self.reg(rt)),
+
+            Instruction::Xor { rs, rt, rd } => self.set_reg(rd, self.reg(rs) ^ self.reg(rt)),
 
             Instruction::Nor { rs, rt, rd } => self.set_reg(rd, !(self.reg(rs) | self.reg(rt))),
 
@@ -352,6 +383,8 @@ impl Cpu {
 
             Instruction::Ori { imm, rt, rs } => self.set_reg(rt, self.reg(rs) | imm),
 
+            Instruction::Xori { imm, rt, rs } => self.set_reg(rt, self.reg(rs) ^ imm),
+
             Instruction::Lui { imm, rt } => self.set_reg(rt, imm << 16),
 
             Instruction::Mfc0 { rt, rd } => {
@@ -389,6 +422,10 @@ impl Cpu {
                 CopRegister(r) => bail!("CPU: move to an unhandled COP0 register: {r}"),
             },
 
+            Instruction::Cop1 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Cop3 => self.raise(Exception::CoprocessorError),
+
             Instruction::Rfe => {
                 let mode = self.sr & 0x3f;
                 self.sr &= !0xf;
@@ -418,6 +455,28 @@ impl Cpu {
 
                     self.delayed_load = (rt, val as u32);
                 }
+            }
+
+            Instruction::Lwl { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                let val = if self.current_load.0 == rt {
+                    self.current_load.1
+                } else {
+                    0
+                };
+
+                let aligned_word: u32 = self.load(addr & !3)?;
+
+                let val = match addr & 3 {
+                    0 => (val & 0x00ffffff) | (aligned_word << 24),
+                    1 => (val & 0x0000ffff) | (aligned_word << 16),
+                    2 => (val & 0x000000ff) | (aligned_word << 8),
+                    3 => aligned_word,
+                    _ => unreachable!(),
+                };
+
+                self.delayed_load = (rt, val);
             }
 
             Instruction::Lw { rs, rt, imm } => {
@@ -461,6 +520,28 @@ impl Cpu {
                 }
             }
 
+            Instruction::Lwr { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+
+                let val = if self.current_load.0 == rt {
+                    self.current_load.1
+                } else {
+                    0
+                };
+
+                let aligned_word: u32 = self.load(addr & !3)?;
+
+                let val = match addr & 3 {
+                    0 => aligned_word,
+                    1 => (val & 0xff000000) | (aligned_word >> 8),
+                    2 => (val & 0xffff0000) | (aligned_word >> 16),
+                    3 => (val & 0xffffff00) | (aligned_word >> 24),
+                    _ => unreachable!(),
+                };
+
+                self.delayed_load = (rt, val);
+            }
+
             Instruction::Sb { rs, rt, imm } => {
                 if self.sr & 0x10000 == 0 {
                     // cache is not isolated, do store
@@ -482,6 +563,23 @@ impl Cpu {
                 }
             }
 
+            Instruction::Swl { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+                let aligned_addr = addr & !3;
+                let aligned_mem: u32 = self.load(aligned_addr)?;
+                let val = self.reg(rt);
+
+                let val = match addr & 3 {
+                    0 => (aligned_mem & 0xffffff00) | (val >> 24),
+                    1 => (aligned_mem & 0xffff0000) | (val >> 24),
+                    2 => (aligned_mem & 0xff000000) | (val >> 24),
+                    3 => val,
+                    _ => unreachable!(),
+                };
+
+                self.store(aligned_addr, val)?;
+            }
+
             Instruction::Sw { rs, rt, imm } => {
                 let addr = self.reg(rs).wrapping_add(imm);
 
@@ -494,6 +592,44 @@ impl Cpu {
                     // cache is not isolated, do store
                     self.store(addr, self.reg(rt))?
                 }
+            }
+
+            Instruction::Swr { rs, rt, imm } => {
+                let addr = self.reg(rs).wrapping_add(imm);
+                let aligned_addr = addr & !3;
+                let aligned_mem: u32 = self.load(aligned_addr)?;
+                let val = self.reg(rt);
+
+                let val = match addr & 3 {
+                    0 => val,
+                    1 => (aligned_mem & 0x000000ff) | (val << 8),
+                    2 => (aligned_mem & 0x0000ffff) | (val << 16),
+                    3 => (aligned_mem & 0x00ffffff) | (val << 24),
+                    _ => unreachable!(),
+                };
+
+                self.store(aligned_addr, val)?;
+            }
+
+            Instruction::Lwc0 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Lwc1 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Lwc2 { .. } => bail!("CPU: FIXME: Load to coprocessor 2"),
+
+            Instruction::Lwc3 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Swc0 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Swc1 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Swc2 { .. } => bail!("CPU: FIXME: Store from coprocessor 2"),
+
+            Instruction::Swc3 => self.raise(Exception::CoprocessorError),
+
+            Instruction::Illegal { code } => {
+                println!("CPU: Illegal instruction encountered: 0x{:08x}", code);
+                self.raise(Exception::IllegalInstruction);
             }
         }
 
@@ -541,10 +677,13 @@ enum Exception {
     LoadAddressError = 0x04,
     StoreAddressError = 0x05,
     Syscall = 0x08,
+    Break = 0x09,
+    IllegalInstruction = 0x0a,
+    CoprocessorError = 0x0b,
     Overflow = 0x0c,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Register(u32);
 
 impl std::fmt::Debug for Register {
@@ -642,8 +781,11 @@ enum Instruction {
     /// Jump to Register And Link
     Jalr { rs: Register, rd: Register },
 
-    /// Syscall
+    /// SYSCALL
     Syscall,
+
+    /// BREAK
+    Break,
 
     /// Move From HI
     Mfhi { rd: Register },
@@ -657,14 +799,17 @@ enum Instruction {
     /// Move To LO
     Mtlo { rs: Register },
 
+    /// MULTiply (signed)
+    Mult { rs: Register, rt: Register },
+
+    /// MULTiply Unsigned
+    Multu { rs: Register, rt: Register },
+
     /// DIVide (signed)
     Div { rs: Register, rt: Register },
 
     /// DIVide Unsigned
     Divu { rs: Register, rt: Register },
-
-    /// MULTiply Unsigned
-    Multu { rs: Register, rt: Register },
 
     /// ADD (with signed overflow trap)
     Add {
@@ -680,7 +825,14 @@ enum Instruction {
         rd: Register,
     },
 
-    /// SUB Unsigned (w/o signed overflow trap)
+    /// SUBtract (with signed overflow trap)
+    Sub {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
+    /// SUBtract Unsigned (w/o signed overflow trap)
     Subu {
         rs: Register,
         rt: Register,
@@ -701,6 +853,14 @@ enum Instruction {
         rd: Register,
     },
 
+    /// bitwise XOR
+    Xor {
+        rs: Register,
+        rt: Register,
+        rd: Register,
+    },
+
+    /// bitwise NOR
     Nor {
         rs: Register,
         rt: Register,
@@ -802,6 +962,13 @@ enum Instruction {
         imm: u32,
     },
 
+    /// XOR Immediate
+    Xori {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
     /// Load Upper Immediate
     Lui { rt: Register, imm: u32 },
 
@@ -810,6 +977,12 @@ enum Instruction {
 
     /// Move To Cop0
     Mtc0 { rt: Register, rd: CopRegister },
+
+    /// COProcessor 1 instruction
+    Cop1,
+
+    /// COProcessor 3 instruction
+    Cop3,
 
     /// Return From Exception
     Rfe,
@@ -823,6 +996,13 @@ enum Instruction {
 
     /// Load Halfword (signed)
     Lh {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
+    /// Load Word Left
+    Lwl {
         rs: Register,
         rt: Register,
         imm: u32,
@@ -849,6 +1029,13 @@ enum Instruction {
         imm: u32,
     },
 
+    /// Load Word Right
+    Lwr {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
     /// Store Byte
     Sb {
         rs: Register,
@@ -863,12 +1050,61 @@ enum Instruction {
         imm: u32,
     },
 
+    /// Store Word Left
+    Swl {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
     /// Store Word
     Sw {
         rs: Register,
         rt: Register,
         imm: u32,
     },
+
+    /// Store Word Right
+    Swr {
+        rs: Register,
+        rt: Register,
+        imm: u32,
+    },
+
+    /// Load Word to Coprocessor 0
+    Lwc0,
+
+    /// Load Word to Coprocessor 1
+    Lwc1,
+
+    /// Load Word to Coprocessor 2
+    Lwc2 {
+        _rs: Register,
+        _rt: CopRegister,
+        _imm: u32,
+    },
+
+    /// Load Word to Coprocessor 3
+    Lwc3,
+
+    /// Store Word from Coprocessor 0
+    Swc0,
+
+    /// Store Word from Coprocessor 1
+    Swc1,
+
+    /// Store Word from Coprocessor 2
+    Swc2 {
+        _rs: Register,
+        _rt: CopRegister,
+        _imm: u32,
+    },
+
+    /// Store Word from Coprocessor 3
+    Swc3,
+
+    /// an illegal instruction
+    Illegal { code: u32 },
 }
 
 impl Instruction {
@@ -893,6 +1129,8 @@ impl Instruction {
 
                 0x0c => Ok(Self::Syscall),
 
+                0x0d => Ok(Self::Break),
+
                 0x10 => Ok(Self::Mfhi { rd: Self::rd(code) }),
 
                 0x11 => Ok(Self::Mthi { rs: Self::rs(code) }),
@@ -901,15 +1139,19 @@ impl Instruction {
 
                 0x13 => Ok(Self::Mtlo { rs: Self::rs(code) }),
 
+                0x18 => Ok(Self::Mult { rs: Self::rs(code), rt: Self::rt(code) }),
+
+                0x19 => Ok(Self::Multu { rs: Self::rs(code), rt: Self::rt(code) }),
+
                 0x1a => Ok(Self::Div { rs: Self::rs(code), rt: Self::rt(code) }),
 
                 0x1b => Ok(Self::Divu { rs: Self::rs(code), rt: Self::rt(code) }),
 
-                0x19 => Ok(Self::Multu { rs: Self::rs(code), rt: Self::rt(code) }),
-
                 0x20 => Ok(Self::Add { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x21 => Ok(Self::Addu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
+                0x22 => Ok(Self::Sub { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x23 => Ok(Self::Subu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
@@ -917,18 +1159,15 @@ impl Instruction {
 
                 0x25 => Ok(Self::Or { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
+                0x26 => Ok(Self::Xor { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
+
                 0x27 => Ok(Self::Nor { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x2a => Ok(Self::Slt { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
                 0x2b => Ok(Self::Sltu { rt: Self::rt(code), rs: Self::rs(code), rd: Self::rd(code) }),
 
-                _ => bail!(
-                    "CPU: unable to decode instruction 0x{:08x} (opcode 0x{:02x}, secondary opcode: 0x{:02x})",
-                    code,
-                    Self::opcode(code),
-                    Self::secondary_opcode(code),
-                )
+                _ => Ok(Self::Illegal { code })
             }
 
             0x01 => Ok(Self::Bcondz { rs: Self::rs(code), bcondz_specifier: Self::bcondz_specifier(code), imm: Self::imm16_se(code) }),
@@ -955,11 +1194,9 @@ impl Instruction {
 
             0x0c => Ok(Self::Andi { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16(code) }),
 
-            0x0d => Ok(Self::Ori {
-                imm: Self::imm16(code),
-                rt: Self::rt(code),
-                rs: Self::rs(code),
-            }),
+            0x0d => Ok(Self::Ori { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16(code) }),
+
+            0x0e => Ok(Self::Xori { rs: Self::rs(code), rt: Self::rt(code), imm: Self::imm16(code) }),
 
             0x0f => Ok(Self::Lui {
                 imm: Self::imm16(code),
@@ -985,6 +1222,17 @@ impl Instruction {
                 )
             }
 
+            0x11 => Ok(Self::Cop1),
+
+            0x12 => bail!(
+                "CPU: FIXME: encountered GTE instruction 0x{:08x} (opcode 0x{:02x}, coprocessor opcode: 0x{:02x}). The GTE is not implemented",
+                code,
+                Self::opcode(code),
+                Self::cop_opcode(code)
+            ),
+
+            0x13 => Ok(Self::Cop3),
+
             0x20 => Ok(Self::Lb {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
@@ -992,6 +1240,12 @@ impl Instruction {
             }),
 
             0x21 => Ok(Self::Lh {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
+            0x22 => Ok(Self::Lwl {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
                 imm: Self::imm16_se(code),
@@ -1015,6 +1269,12 @@ impl Instruction {
                 imm: Self::imm16_se(code),
             }),
 
+            0x26 => Ok(Self::Lwr {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
             0x28 => Ok(Self::Sb {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
@@ -1027,17 +1287,49 @@ impl Instruction {
                 imm: Self::imm16_se(code),
             }),
 
+            0x2a => Ok(Self::Swl {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
             0x2b => Ok(Self::Sw {
                 rs: Self::rs(code),
                 rt: Self::rt(code),
                 imm: Self::imm16_se(code),
             }),
 
-            _ => bail!(
-                "CPU: unable to decode instruction 0x{:08x} (opcode 0x{:02x})",
-                code,
-                Self::opcode(code)
-            )
+            0x2e => Ok(Self::Swr {
+                rs: Self::rs(code),
+                rt: Self::rt(code),
+                imm: Self::imm16_se(code),
+            }),
+
+            0x30 => Ok(Self::Lwc0),
+
+            0x31 => Ok(Self::Lwc1),
+
+            0x32 => Ok(Self::Lwc2 {
+                _rs: Self::rs(code),
+                _rt: Self::rt_cop(code),
+                _imm: Self::imm16_se(code), // FIXME: I don't know if this should be sign-extended
+            }),
+
+            0x33 => Ok(Self::Lwc3),
+
+            0x38 => Ok(Self::Swc0),
+
+            0x39 => Ok(Self::Swc1),
+
+            0x3a => Ok(Self::Swc2 {
+                _rs: Self::rs(code),
+                _rt: Self::rt_cop(code),
+                _imm: Self::imm16_se(code), // FIXME: I don't know if this should be sign-extended
+            }),
+
+            0x3b => Ok(Self::Swc3),
+
+            _ => Ok(Self::Illegal { code }),
         }
     }
 
@@ -1053,7 +1345,7 @@ impl Instruction {
         Register((code >> 16) & 0x1f)
     }
 
-    fn _rt_cop(code: u32) -> CopRegister {
+    fn rt_cop(code: u32) -> CopRegister {
         CopRegister((code >> 16) & 0x1f)
     }
 
