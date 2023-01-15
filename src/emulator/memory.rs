@@ -13,7 +13,6 @@ pub trait Addressible: Copy {
     fn from_u32(val: u32) -> Self;
     fn from_le_bytes(bytes: &[u8]) -> Self;
     fn to_u32(self) -> u32;
-    fn write_for_mem_ctl_1_ok(self, offset: u32) -> bool;
 }
 
 impl Addressible for u8 {
@@ -31,10 +30,6 @@ impl Addressible for u8 {
 
     fn to_u32(self) -> u32 {
         self as u32
-    }
-
-    fn write_for_mem_ctl_1_ok(self, _: u32) -> bool {
-        false
     }
 }
 
@@ -54,10 +49,6 @@ impl Addressible for u16 {
     fn to_u32(self) -> u32 {
         self as u32
     }
-
-    fn write_for_mem_ctl_1_ok(self, _: u32) -> bool {
-        false
-    }
 }
 
 impl Addressible for u32 {
@@ -75,18 +66,6 @@ impl Addressible for u32 {
 
     fn to_u32(self) -> u32 {
         self
-    }
-
-    fn write_for_mem_ctl_1_ok(self, offset: u32) -> bool {
-        if offset == 0 && self != 0x1f000000 {
-            return false;
-        }
-
-        if offset == 4 && self != 0x1f802000 {
-            return false;
-        }
-
-        true
     }
 }
 
@@ -138,6 +117,18 @@ impl Memory {
             return Ok(T::from_u32(0));
         }
 
+        if let Some(offset) = offset_in(addr, map::GPU) {
+            println!("Memory: FIXME: load from a GPU register");
+
+            let val = match offset {
+                // FIXME: This is just so that the BIOS thinks the GPU can receive another DMA block
+                4 => 0x10000000,
+                _ => 0,
+            };
+
+            return Ok(T::from_u32(val));
+        }
+
         if offset_in(addr, map::SPU).is_some() {
             println!("Memory: FIXME: load from the SPU");
             return Ok(T::from_u32(0));
@@ -175,11 +166,27 @@ impl Memory {
         }
 
         if let Some(offset) = offset_in(addr, map::MEM_CTL_1) {
-            if val.write_for_mem_ctl_1_ok(offset) {
-                println!("FIXME: Unhandled mem ctl 1 write (addr = {})", addr);
-                return Ok(());
-            } else {
-                bail!("Memory: writing a bad value to one of the expansion addresses")
+            match offset {
+                0 => {
+                    if val.to_u32() == 0x1f000000 {
+                        return Ok(());
+                    } else {
+                        bail!("Memory: writing a bad value to one of the expansion addresses")
+                    }
+                }
+
+                4 => {
+                    if val.to_u32() == 0x1f802000 {
+                        return Ok(());
+                    } else {
+                        bail!("Memory: writing a bad value to one of the expansion addresses")
+                    }
+                }
+
+                _ => {
+                    println!("Memory: FIXME: unhandled write to MEM CTL 1");
+                    return Ok(());
+                }
             }
         }
 
@@ -199,9 +206,13 @@ impl Memory {
         }
 
         if offset_in(addr, map::TIMERS).is_some() {
-            if val.to_u32() != 0 {
-                bail!("Memory: Store to the timers mmio");
-            }
+            println!("Memory: FIXME: Store to the timers mmio");
+
+            return Ok(());
+        }
+
+        if offset_in(addr, map::GPU).is_some() {
+            println!("Memory: FIXME: store to a GPU register");
 
             return Ok(());
         }
@@ -294,6 +305,10 @@ mod map {
     pub const TIMERS_SIZE: u32 = 0x32;
     /// Timers
     pub const TIMERS: Range<u32> = 0x1f801100..0x1f801100 + TIMERS_SIZE;
+
+    pub const GPU_SIZE: u32 = 8;
+    /// GPU
+    pub const GPU: Range<u32> = 0x1f801810..0x1f801810 + GPU_SIZE;
 
     pub const SPU_SIZE: u32 = 1024;
     /// Sound Processing Unit
