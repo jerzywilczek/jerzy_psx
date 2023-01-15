@@ -2,8 +2,11 @@ use std::{fmt::Display, ops::Range, path::Path};
 
 use anyhow::{bail, Context, Result};
 
+use dma::Dma;
+
 pub struct Memory {
     bios: Bios,
+    dma: Dma,
     ram: Ram,
 }
 
@@ -74,9 +77,11 @@ impl Memory {
         let bios =
             Bios::new(bios_path).context("Memory: error while creating the BIOS component")?;
 
+        let dma = Dma::new();
+
         let ram = Ram::new();
 
-        Ok(Self { bios, ram })
+        Ok(Self { bios, dma, ram })
     }
 
     pub fn load<T: Addressible>(&self, addr: u32) -> Result<T> {
@@ -107,9 +112,11 @@ impl Memory {
             bail!("Memory: FIXME: load from mem ctl 2")
         }
 
-        if offset_in(addr, map::DMA).is_some() {
-            println!("Memory: FIXME: load from DMA");
-            return Ok(T::from_u32(0));
+        if let Some(offset) = offset_in(addr, map::DMA) {
+            if T::WIDTH != 4 {
+                bail!("Memory: FIXME: figure out what to do with DMA halfword and byte access")
+            }
+            return self.dma.reg(offset).map(|val| T::from_u32(val));
         }
 
         if offset_in(addr, map::INTERRUPT_CTL).is_some() {
@@ -195,9 +202,12 @@ impl Memory {
             return Ok(());
         }
 
-        if offset_in(addr, map::DMA).is_some() {
-            println!("Memory: FiXME: DMA store ({:#x} to {})", val.to_u32(), addr);
-            return Ok(());
+        if let Some(offset) = offset_in(addr, map::DMA) {
+            if T::WIDTH != 4 {
+                bail!("Memory: FIXME: figure out how to handle halfword- and byte-long stores ")
+            }
+
+            return self.dma.set_reg(offset, val.to_u32());
         }
 
         if offset_in(addr, map::INTERRUPT_CTL).is_some() {
@@ -375,5 +385,107 @@ impl Bios {
         let offset = offset as usize;
 
         T::from_le_bytes(&self.data[offset..offset + T::WIDTH as usize])
+    }
+}
+
+mod dma {
+    use anyhow::{bail, Result};
+    pub struct Dma {
+        control: u32,
+        interrupt: InterruptReg,
+    }
+
+    impl Dma {
+        pub fn new() -> Self {
+            Self {
+                control: 0x07654321,
+                interrupt: InterruptReg::new(),
+            }
+        }
+
+        pub fn reg(&self, offset: u32) -> Result<u32> {
+            let val = match offset {
+                0x70 => self.control,
+
+                0x74 => self.interrupt.reg(),
+
+                _ => bail!("DMA: unhandled register access (offset = {:#x})", offset),
+            };
+
+            #[cfg(feature = "dma-debug")]
+            println!("DMA register read: [{:#x}] = {:#x}", offset, val);
+
+            Ok(val)
+        }
+
+        pub fn set_reg(&mut self, offset: u32, val: u32) -> Result<()> {
+            #[cfg(feature = "dma-debug")]
+            println!("DMA register set: {:#x} => {:#x}", val, offset);
+
+            match offset {
+                0x70 => {
+                    self.set_control(val);
+                    Ok(())
+                }
+
+                0x74 => {
+                    self.interrupt.set(val);
+                    Ok(())
+                }
+
+                _ => bail!(
+                    "DMA: unhandled register store (offset = {:#x}, value: 0x{:08x})",
+                    offset,
+                    val
+                ),
+            }
+        }
+
+        fn set_control(&mut self, val: u32) {
+            self.control = val;
+        }
+    }
+
+    struct InterruptReg {
+        /// The use of the low 5 bits if the interrupt register is unknown, but they are RW
+        low5: u8,
+        force_irq: bool,
+        irq_enable: u8,
+        irq_enable_signal: bool,
+        irq_flags: u8,
+    }
+
+    impl InterruptReg {
+        fn new() -> Self {
+            Self {
+                low5: 0,
+                force_irq: false,
+                irq_enable: 0,
+                irq_enable_signal: false,
+                irq_flags: 0,
+            }
+        }
+
+        fn irq_signal(&self) -> bool {
+            self.force_irq || (self.irq_enable_signal && self.irq_flags > 0)
+        }
+
+        fn reg(&self) -> u32 {
+            self.low5 as u32
+                | (self.force_irq as u32) << 15
+                | (self.irq_enable as u32) << 16
+                | (self.irq_enable_signal as u32) << 23
+                | (self.irq_flags as u32) << 24
+                | (self.irq_signal() as u32) << 31
+        }
+
+        fn set(&mut self, val: u32) {
+            self.low5 = (val & 0x1f) as u8;
+            self.force_irq = val & (1 << 15) != 0;
+            self.irq_enable = ((val >> 16) & 0x7f) as u8;
+            self.irq_enable_signal = val & (1 << 23) != 0;
+            // writing a 1 to a flag acknowledges it
+            self.irq_flags &= !((val >> 24) & 0x7f) as u8;
+        }
     }
 }
