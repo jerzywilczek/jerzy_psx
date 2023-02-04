@@ -393,6 +393,7 @@ mod dma {
     pub struct Dma {
         control: u32,
         interrupt: InterruptReg,
+        channels: [ChannelCtl; 7],
     }
 
     impl Dma {
@@ -400,16 +401,38 @@ mod dma {
             Self {
                 control: 0x07654321,
                 interrupt: InterruptReg::new(),
+                channels: Default::default(),
             }
         }
 
+        fn port_and_port_offset(offset: u32) -> (u32, u32) {
+            ((offset & 0x70) >> 4, offset & 0xf)
+        }
+
         pub fn reg(&self, offset: u32) -> Result<u32> {
-            let val = match offset {
-                0x70 => self.control,
+            fn error(offset: u32) -> Result<u32> {
+                bail!("DMA: unhandled register access (offset = {:#x})", offset)
+            }
 
-                0x74 => self.interrupt.reg(),
+            let (port, port_offset) = Self::port_and_port_offset(offset);
 
-                _ => bail!("DMA: unhandled register access (offset = {:#x})", offset),
+            let val = match port {
+                0..=6 => {
+                    let channel = self.channel(port.try_into().unwrap());
+
+                    match port_offset {
+                        8 => channel.reg(),
+                        _ => return error(offset),
+                    }
+                }
+
+                7 => match port_offset {
+                    0 => self.control,
+                    4 => self.interrupt.reg(),
+                    _ => return error(offset),
+                },
+
+                _ => return error(offset),
             };
 
             #[cfg(feature = "dma-debug")]
@@ -419,26 +442,50 @@ mod dma {
         }
 
         pub fn set_reg(&mut self, offset: u32, val: u32) -> Result<()> {
-            #[cfg(feature = "dma-debug")]
-            println!("DMA register set: {:#x} => {:#x}", val, offset);
-
-            match offset {
-                0x70 => {
-                    self.set_control(val);
-                    Ok(())
-                }
-
-                0x74 => {
-                    self.interrupt.set(val);
-                    Ok(())
-                }
-
-                _ => bail!(
+            fn error(offset: u32, val: u32) -> Result<()> {
+                bail!(
                     "DMA: unhandled register store (offset = {:#x}, value: 0x{:08x})",
                     offset,
                     val
-                ),
+                )
             }
+
+            #[cfg(feature = "dma-debug")]
+            println!("DMA register set: {:#x} => {:#x}", val, offset);
+
+            let (port, port_offset) = Self::port_and_port_offset(offset);
+
+            match port {
+                0..=6 => {
+                    let channel = self.channel_mut(port.try_into().unwrap());
+
+                    match port_offset {
+                        8 => channel.set_reg(val),
+
+                        _ => return error(offset, val),
+                    }
+                }
+
+                7 => match port_offset {
+                    0 => self.set_control(val),
+
+                    4 => self.interrupt.set(val),
+
+                    _ => return error(offset, val),
+                },
+
+                _ => return error(offset, val),
+            }
+
+            Ok(())
+        }
+
+        fn channel(&self, port: Port) -> &ChannelCtl {
+            &self.channels[port as usize]
+        }
+
+        fn channel_mut(&mut self, port: Port) -> &mut ChannelCtl {
+            &mut self.channels[port as usize]
         }
 
         fn set_control(&mut self, val: u32) {
@@ -486,6 +533,147 @@ mod dma {
             self.irq_enable_signal = val & (1 << 23) != 0;
             // writing a 1 to a flag acknowledges it
             self.irq_flags &= !((val >> 24) & 0x7f) as u8;
+        }
+    }
+
+    /// DMA transfer direction
+    #[derive(Debug, Default, Clone, Copy)]
+    #[repr(u8)]
+    enum Direction {
+        #[default]
+        ToRam = 0,
+        FromRam,
+    }
+
+    impl TryFrom<u8> for Direction {
+        type Error = anyhow::Error;
+
+        fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+            match value {
+                0 => Ok(Self::ToRam),
+                1 => Ok(Self::FromRam),
+                _ => bail!("Tried to construct Direction from a bad value"),
+            }
+        }
+    }
+
+    /// DMA transfer step
+    #[derive(Debug, Default, Clone, Copy)]
+    #[repr(u8)]
+    enum TransferStep {
+        #[default]
+        Increment,
+        Decrement,
+    }
+
+    impl TryFrom<u8> for TransferStep {
+        type Error = anyhow::Error;
+
+        fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+            match value {
+                0 => Ok(Self::Increment),
+                1 => Ok(Self::Decrement),
+                _ => bail!("Tried to construct TransferStep from a bad value"),
+            }
+        }
+    }
+
+    /// DMA sync mode
+    #[derive(Debug, Default, Clone, Copy)]
+    #[repr(u8)]
+    enum SyncMode {
+        #[default]
+        Manual = 0,
+        Block,
+        LinkedList,
+    }
+
+    impl TryFrom<u8> for SyncMode {
+        type Error = anyhow::Error;
+
+        fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+            match value {
+                0 => Ok(Self::Manual),
+                1 => Ok(Self::Block),
+                2 => Ok(Self::LinkedList),
+                _ => bail!("Tried to construct SyncMode from a bad value"),
+            }
+        }
+    }
+
+    /// DMA channel control register
+    #[derive(Debug, Default)]
+    struct ChannelCtl {
+        transfer_direction: Direction,
+        memory_addr_step: TransferStep,
+        enable_chopping: bool,
+        sync_mode: SyncMode,
+        chopping_dma_window_size: u8,
+        chopping_cpu_window_size: u8,
+        start_busy: bool,
+        start_trigger: bool,
+        dummy: u8,
+    }
+
+    impl ChannelCtl {
+        fn reg(&self) -> u32 {
+            self.transfer_direction as u32
+                | (self.memory_addr_step as u32) << 1
+                | (self.enable_chopping as u32) << 8
+                | (self.sync_mode as u32) << 9
+                | (self.chopping_dma_window_size as u32) << 16
+                | (self.chopping_cpu_window_size as u32) << 20
+                | (self.start_busy as u32) << 24
+                | (self.start_trigger as u32) << 28
+                | (self.dummy as u32) << 29
+        }
+
+        fn set_reg(&mut self, val: u32) {
+            self.transfer_direction = (val as u8 & 1).try_into().unwrap();
+            self.memory_addr_step = ((val >> 1) as u8 & 1).try_into().unwrap();
+            self.enable_chopping = (val >> 8) & 1 != 0;
+            self.sync_mode = ((val >> 9) as u8 & 3).try_into().unwrap();
+            self.chopping_dma_window_size = (val >> 16) as u8 & 7;
+            self.chopping_cpu_window_size = (val >> 20) as u8 & 7;
+            self.start_busy = (val >> 24) & 1 != 0;
+            self.start_trigger = (val >> 28) & 1 != 0;
+            self.dummy = (val >> 29) as u8 & 3;
+        }
+    }
+
+    /// The devices that use the DMA
+    #[derive(Debug, Clone, Copy)]
+    enum Port {
+        /// Macroblock decoder in
+        MdecIn = 0,
+        /// Macroblock decoder out
+        MdecOut,
+        /// GPU
+        Gpu,
+        /// CD-ROM
+        Cdrom,
+        /// Sound processing unit
+        Spu,
+        /// Extension port
+        Pio,
+        /// Clear the ordering table
+        Otc,
+    }
+
+    impl TryFrom<u32> for Port {
+        type Error = anyhow::Error;
+
+        fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+            match value {
+                0 => Ok(Self::MdecIn),
+                1 => Ok(Self::MdecOut),
+                2 => Ok(Self::Gpu),
+                3 => Ok(Self::Cdrom),
+                4 => Ok(Self::Spu),
+                5 => Ok(Self::Pio),
+                6 => Ok(Self::Otc),
+                n => bail!("Tried to construct a DMA Port with a bad number ({})", n),
+            }
         }
     }
 }
