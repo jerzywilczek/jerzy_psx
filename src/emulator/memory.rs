@@ -393,7 +393,7 @@ mod dma {
     pub struct Dma {
         control: u32,
         interrupt: InterruptReg,
-        channels: [ChannelCtl; 7],
+        channels: [Channel; 7],
     }
 
     impl Dma {
@@ -421,14 +421,21 @@ mod dma {
                     let channel = self.channel(port.try_into().unwrap());
 
                     match port_offset {
-                        8 => channel.reg(),
+                        0 => channel.base_addr.reg(),
+
+                        4 => channel.block_ctl.reg(),
+
+                        8 => channel.ctl.reg(),
+
                         _ => return error(offset),
                     }
                 }
 
                 7 => match port_offset {
                     0 => self.control,
+
                     4 => self.interrupt.reg(),
+
                     _ => return error(offset),
                 },
 
@@ -460,7 +467,11 @@ mod dma {
                     let channel = self.channel_mut(port.try_into().unwrap());
 
                     match port_offset {
-                        8 => channel.set_reg(val),
+                        0 => channel.base_addr.set(val),
+
+                        4 => channel.block_ctl.set(val),
+
+                        8 => channel.ctl.set(val),
 
                         _ => return error(offset, val),
                     }
@@ -480,11 +491,11 @@ mod dma {
             Ok(())
         }
 
-        fn channel(&self, port: Port) -> &ChannelCtl {
+        fn channel(&self, port: Port) -> &Channel {
             &self.channels[port as usize]
         }
 
-        fn channel_mut(&mut self, port: Port) -> &mut ChannelCtl {
+        fn channel_mut(&mut self, port: Port) -> &mut Channel {
             &mut self.channels[port as usize]
         }
 
@@ -601,6 +612,45 @@ mod dma {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct Channel {
+        ctl: ChannelCtl,
+        base_addr: BaseAddr,
+        block_ctl: BlockCtl,
+    }
+
+    /// Block control register
+    #[derive(Debug, Default)]
+    struct BlockCtl {
+        block_size: u16,
+        block_amount: u16,
+    }
+
+    impl BlockCtl {
+        fn reg(&self) -> u32 {
+            ((self.block_amount as u32) << 16) | (self.block_size as u32)
+        }
+
+        fn set(&mut self, val: u32) {
+            self.block_amount = (val >> 16) as u16;
+            self.block_size = (val & 0xffff) as u16
+        }
+    }
+
+    /// Base address register
+    #[derive(Debug, Default)]
+    struct BaseAddr(u32);
+
+    impl BaseAddr {
+        fn reg(&self) -> u32 {
+            self.0
+        }
+
+        fn set(&mut self, addr: u32) {
+            self.0 = addr & 0x00ffffff
+        }
+    }
+
     /// DMA channel control register
     #[derive(Debug, Default)]
     struct ChannelCtl {
@@ -628,7 +678,7 @@ mod dma {
                 | (self.dummy as u32) << 29
         }
 
-        fn set_reg(&mut self, val: u32) {
+        fn set(&mut self, val: u32) {
             self.transfer_direction = (val as u8 & 1).try_into().unwrap();
             self.memory_addr_step = ((val >> 1) as u8 & 1).try_into().unwrap();
             self.enable_chopping = (val >> 8) & 1 != 0;
